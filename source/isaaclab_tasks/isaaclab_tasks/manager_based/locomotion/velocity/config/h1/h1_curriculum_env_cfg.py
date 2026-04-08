@@ -68,13 +68,14 @@ class H1FullCurriculumEnvCfg(H1RoughEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         
-        # --- 1. COMMANDS ---
-        self.commands.base_velocity.ranges.lin_vel_x = (1.0, 2.0)
-        self.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0) 
-        self.commands.base_velocity.ranges.ang_vel_z = (-0.1, 0.1) 
+       # Start with a moderate jog, the curriculum will expand it up to 5.0 m/s
+        self.commands.base_velocity.ranges.lin_vel_x = (0.0, 0.5)
+        self.commands.base_velocity.ranges.lin_vel_y = (-0.2, 0.2) 
+        self.commands.base_velocity.ranges.ang_vel_z = (-1.5, 1.5) 
         
-        # --- 2. HACK THE REWARDS FOR MAXIMUM SPEED ---
+        # Massive incentive to track the high-speed push_force commands
         self.rewards.track_lin_vel_xy_exp.weight = 5.0 
+        self.rewards.track_ang_vel_z_exp = 2.5
         
         # Turn OFF all safety and energy penalties
         self.rewards.dof_torques_l2.weight = 0.0       
