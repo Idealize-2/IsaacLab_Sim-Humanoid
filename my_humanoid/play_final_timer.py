@@ -6,6 +6,7 @@ import argparse
 import os
 import pathlib
 import traceback
+import time  
 from isaaclab.app import AppLauncher
 
 # 1. Setup Arguments
@@ -25,23 +26,53 @@ import torch
 import gymnasium as gym
 import carb
 import omni.appwindow
+import omni.ui as ui 
 
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg, load_cfg_from_registry
 from rsl_rl.runners import OnPolicyRunner
 
+class TimerUI:
+    """Creates a floating GUI window inside Isaac Sim to display lap times."""
+    def __init__(self):
+        self.window = ui.Window("⏱️ Challenge Timer", width=300, height=180, 
+                                flags=ui.WINDOW_FLAGS_NO_SCROLLBAR | ui.WINDOW_FLAGS_NO_RESIZE)
+        
+        with self.window.frame:
+            with ui.VStack(spacing=10, style={"margin": 15}):
+                ui.Label("CURRENT LAP:", style={"color": 0xFFAAAAAA, "font_size": 14})
+                self.current_label = ui.Label("0.00s", 
+                                              style={"color": 0xFF00FF00, "font_size": 48, "alignment": ui.Alignment.CENTER}) 
+                
+                ui.Spacer(height=5)
+                
+                ui.Label("BEST TIME:", style={"color": 0xFFAAAAAA, "font_size": 14})
+                self.best_label = ui.Label("--.--s", 
+                                           style={"color": 0xFFFFBB00, "font_size": 24, "alignment": ui.Alignment.CENTER}) 
+
+    def update_display(self, current_time, best_time, is_running):
+        self.current_label.text = f"{current_time:.2f}s"
+        
+        if is_running:
+            self.current_label.style = {"color": 0xFF00FF00, "font_size": 48, "alignment": ui.Alignment.CENTER} 
+        else:
+            self.current_label.style = {"color": 0xFFFFFFFF, "font_size": 48, "alignment": ui.Alignment.CENTER} 
+            
+        if best_time < 999.0:
+            self.best_label.text = f"{best_time:.2f}s"
+
+
 class InteractiveController:
     """Handles keyboard inputs to override robot velocity commands with smooth acceleration."""
     def __init__(self, device):
         self.device = device
-        
-        # We now have a TARGET command (where we want to go) and a CURRENT command (where we actually are)
-        self.target_command = torch.zeros(3, device=device) # [x_vel, y_vel, yaw_vel]
+        self.target_command = torch.zeros(3, device=device) 
         self.current_command = torch.zeros(3, device=device) 
         
-        # Speeds
-        self.max_lin_vel = 4.0  # Slightly lowered for better stability
+        self.reset_flag = False 
+        
+        self.max_lin_vel = 4.0  
         self.max_ang_vel = 1.5
         
         self.appwindow = omni.appwindow.get_default_app_window()
@@ -55,6 +86,7 @@ class InteractiveController:
         print("  DOWN/S     - Stop")
         print("  LEFT/A     - Turn left")
         print("  RIGHT/D    - Turn right")
+        print("  R          - Reset Robot & Timer") 
         print("  ESC        - Quit")
         print("="*50 + "\n")
 
@@ -68,6 +100,8 @@ class InteractiveController:
                 self.target_command[2] = self.max_ang_vel
             elif event.input.name in ["RIGHT", "D"]:
                 self.target_command[2] = -self.max_ang_vel
+            elif event.input.name == "R":
+                self.reset_flag = True 
             elif event.input.name == "ESCAPE":
                 simulation_app.close()
         elif event.type == carb.input.KeyboardEventType.KEY_RELEASE:
@@ -78,7 +112,6 @@ class InteractiveController:
         return True
         
     def get_smoothed_command(self):
-        # This acts like a gas pedal! It blends 95% of the old speed with 5% of the new speed every frame.
         self.current_command = 0.95 * self.current_command + 0.05 * self.target_command
         return self.current_command
 
@@ -87,7 +120,6 @@ def main():
     env_cfg = parse_env_cfg(args_cli.task)
     agent_cfg = load_cfg_from_registry(args_cli.task, "rsl_rl_cfg_entry_point")
 
-    # Force the path into a strict Omniverse 'file:///' URI
     raw_path = pathlib.Path(args_cli.usd).expanduser().resolve()
     full_usd_path = raw_path.as_uri() 
     
@@ -99,19 +131,16 @@ def main():
         usd_path=full_usd_path,
     )
     
-    # RESTORE THE REAL HEIGHT SCANNER!
-    # Because your USD file is fixed, we just point the lasers directly at the new ground folder.
     if hasattr(env_cfg.scene, "height_scanner") and env_cfg.scene.height_scanner is not None:
         env_cfg.scene.height_scanner.mesh_prim_paths = ["/World/ground"]
         
     env_cfg.curriculum = None
     env_cfg.scene.num_envs = args_cli.num_envs
-    env_cfg.scene.robot.init_state.pos = (-5.5, 0.0, 1.2) # Drop from sky
+    env_cfg.scene.robot.init_state.pos = (-6, 0.0, 1.2) # Drop from sky
     
-    # Configure command ranges
     env_cfg.commands.base_velocity.ranges.lin_vel_x = (0.0, 4.0)
-    env_cfg.commands.base_velocity.ranges.lin_vel_y = (0.0, 0.0)
-    env_cfg.commands.base_velocity.ranges.ang_vel_z = (-2.0, 3.0)
+    env_cfg.commands.base_velocity.ranges.lin_vel_y = (-0.2, 0.2)
+    env_cfg.commands.base_velocity.ranges.ang_vel_z = (-1.5, 1.5)
 
     print(f"[INFO] Creating environment with {env_cfg.scene.num_envs} robot(s)...")
     env = gym.make(args_cli.task, cfg=env_cfg)
@@ -124,6 +153,16 @@ def main():
     policy = runner.get_inference_policy(device=env.unwrapped.device)
 
     controller = InteractiveController(env.unwrapped.device)
+    gui_timer = TimerUI() 
+
+    # --- TIMER SETUP VARIABLES ---
+    FINISH_LINE_X = 6.0
+    timer_running = False
+    timer_finished = False
+    start_time = 0.0
+    best_time = 999.9
+    display_time = 0.0 
+    # -----------------------------
 
     print("[INFO] Starting simulation. Use controls to move the robot.")
     obs, _ = env.reset() 
@@ -131,18 +170,65 @@ def main():
     with torch.inference_mode():
         while simulation_app.is_running():
             
-            # # 1. Get the smoothed gas pedal command
-            # raw_command = controller.get_smoothed_command()
+            # --- MANUAL RESET CATCHER ---
+            if controller.reset_flag:
+                obs, _ = env.reset()
+                controller.reset_flag = False
+                continue 
             
-            # # 2. SCALE THE COMMANDS for the Neural Network!
-            # scaled_command = raw_command.clone()
-            # scaled_command[0] = raw_command[0] * 2.0   # Standard linear scale
-            # scaled_command[1] = raw_command[1] * 2.0
-            # scaled_command[2] = raw_command[2] * 0.25  # Standard angular scale
-            
-            # # 3. Inject the properly scaled commands
-            # obs[:, 9:12] = scaled_command
+            # --- AUTOMATIC TIMER LOGIC ---
+            root_pos = env.unwrapped.scene["robot"].data.root_pos_w[0]
+            current_x = root_pos[0].item()
+            current_z = root_pos[2].item()
 
+            # --- 1.5 AUTO-RESPAWN (THE NEW FIX) ---
+            # If the robot's root drops below -1.0, it fell off the map
+            if current_z < -1.0:
+                print("\n[WARNING] ⚠️ Robot fell off the map! Auto-respawning...")
+                controller.reset_flag = True
+                continue # Skip the rest of this frame so it cleanly resets on the next tick!
+            # ---------------------------------------
+            
+            # 2. Detect Respawn 
+            if current_z > 1.1:
+                if timer_running or timer_finished:
+                    print("\n[TIMER] 🔄 Robot respawned. Resetting clock...")
+                timer_running = False
+                timer_finished = False
+                display_time = 0.0
+                
+            # 3. Detect Landing 
+            elif not timer_running and not timer_finished and current_z < 0.95:
+                timer_running = True
+                start_time = time.time()
+                print("\n" + "="*40)
+                print("[TIMER] 🟢 GO! Robot touched the ground!")
+                print("="*40)
+                
+            # 4. Detect Finish Line 
+            elif timer_running and current_x > FINISH_LINE_X:
+                elapsed_time = time.time() - start_time
+                display_time = elapsed_time 
+                
+                print("\n" + "="*40)
+                print(f"[TIMER] 🏁 FINISH LINE CROSSED!")
+                print(f"[TIMER] Lap Time: {elapsed_time:.2f} seconds")
+                
+                if elapsed_time < best_time:
+                    best_time = elapsed_time
+                    print(f"[TIMER] 🏆 NEW BEST TIME: {best_time:.2f}s!")
+                print("="*40 + "\n")
+                
+                timer_running = False
+                timer_finished = True
+                
+            # 5. Calculate running time 
+            if timer_running:
+                display_time = time.time() - start_time
+                
+            # 6. Send current status to the Omniverse GUI
+            gui_timer.update_display(display_time, best_time, timer_running)
+            
             obs[:, 9:12] = controller.get_smoothed_command()
             
             actions = policy(obs)

@@ -56,6 +56,16 @@ class H1FullCurriculumCfg(CurriculumCfg):
         },
     )
 
+    flat_orientation_weight = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "flat_orientation_l2", "weight": -2.0, "num_steps": 2000},
+    )
+
+    joint_deviation_torso_weight = CurrTerm(
+        func=mdp.modify_reward_weight,
+        params={"term_name": "joint_deviation_torso", "weight": -0.2, "num_steps": 5000},
+    )
+
 # ==============================================================================
 # Environment Configurations
 # ==============================================================================
@@ -75,13 +85,17 @@ class H1FullCurriculumEnvCfg(H1RoughEnvCfg):
         
         # Massive incentive to track the high-speed push_force commands
         self.rewards.track_lin_vel_xy_exp.weight = 5.0 
-        self.rewards.track_ang_vel_z_exp = 2.5
+        self.rewards.track_ang_vel_z_exp.weight = 2.5
         
         # Turn OFF all safety and energy penalties
         self.rewards.dof_torques_l2.weight = 0.0       
         self.rewards.dof_acc_l2.weight = 0.0           
         self.rewards.action_rate_l2.weight = 0.0       
+
         self.rewards.flat_orientation_l2.weight = 0.0  
+        
+
+        
         
         # H1 Specific joint deviation penalties turned off
         if hasattr(self.rewards, "joint_deviation_hip"):
